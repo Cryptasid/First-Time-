@@ -1,0 +1,946 @@
+import os
+os.environ["TK_USE_AGGRESSIVE_DPI_AWARENESS"] = "0"   # Disable DPI scaling
+os.environ["GDK_BACKEND"] = "win32"
+import mysql.connector
+import tkinter as tk
+from tkinter import ttk, messagebox
+
+# UI THEME 
+
+BG = "#0f0f10"
+PANEL = "#151515"
+ACCENT = "#c0392b"
+TEXT = "#ffffff"
+SUBTEXT = "#cfcfcf"
+
+EXPERTISE_OPTIONS = [
+    "Rescuer",
+    "Medic",
+    "Electric Technician",
+    "Chemical Technician"
+]
+
+#  DATABASE 
+
+class DB:
+    def __init__(self):
+
+        try:
+            self.conn = mysql.connector.connect(
+                host="localhost",
+                user="root",
+                password="",
+                database="db_firestation_muktasid"
+            )
+
+            self.cur = self.conn.cursor()
+
+            print("Database connected successfully")
+
+        except mysql.connector.Error as err:
+
+            messagebox.showerror(
+                "Database Connection Error",
+                str(err)
+            )
+
+            self.conn = None
+            self.cur = None
+
+        # GET FIREFIGHTERS
+
+    def get_firefighters(self, search="", expertise="All"):
+
+        query = """
+        SELECT
+            f.firefighter_id,
+            f.ff_name,
+            f.ff_contact,
+            f.ff_expertise,
+
+            CASE
+                WHEN d.firefighter_id IS NULL THEN 'Available'
+                ELSE 'Dispatched'
+            END AS status,
+
+            COALESCE(i.in_threat, '-') AS threat,
+            COALESCE(i.in_city, '-') AS city
+
+        FROM tbl_firefighter f
+
+        LEFT JOIN tbl_dispatch d
+        ON f.firefighter_id = d.firefighter_id
+
+        LEFT JOIN tbl_incident i
+        ON d.incident_id = i.incident_id
+
+        WHERE 1=1
+        """
+
+        params = []
+
+        if search:
+            query += """
+            AND (
+                f.ff_name LIKE %s
+                OR f.firefighter_id LIKE %s
+            )
+            """
+
+            params.extend([
+                f"%{search}%",
+                f"%{search}%"
+            ])
+
+        if expertise != "All":
+            query += " AND f.ff_expertise = %s "
+            params.append(expertise)
+
+        self.cur.execute(query, params)
+
+        return self.cur.fetchall()
+
+    # ADD FIREFIGHTER 
+
+    def add_firefighter(self, fid, name, contact, exp):
+
+        query = """
+        INSERT INTO tbl_firefighter
+        (firefighter_id, ff_name, ff_contact, ff_expertise)
+
+        VALUES (%s, %s, %s, %s)
+        """
+
+        self.cur.execute(query, (fid, name, contact, exp))
+        self.conn.commit()
+
+    # UPDATE FIREFIGHTER 
+
+    def update_firefighter(self, fid, name, contact, exp):
+
+        query = """
+        UPDATE tbl_firefighter
+
+        SET
+            ff_name = %s,
+            ff_contact = %s,
+            ff_expertise = %s
+
+        WHERE firefighter_id = %s
+        """
+
+        self.cur.execute(query, (name, contact, exp, fid))
+        self.conn.commit()
+
+    #  DELETE FIREFIGHTER 
+
+    def delete_firefighter(self, fid):
+
+        # delete dispatch first
+        self.cur.execute(
+            "DELETE FROM tbl_dispatch WHERE firefighter_id = %s",
+            (fid,)
+        )
+
+        self.cur.execute(
+            "DELETE FROM tbl_firefighter WHERE firefighter_id = %s",
+            (fid,)
+        )
+
+        self.conn.commit()
+
+    #  DISPATCH 
+
+    def dispatch(self, fid, threat, street, city):
+
+        
+        query1 = """
+        INSERT INTO tbl_incident
+        (in_threat, in_street, in_city)
+
+        VALUES (%s, %s, %s)
+        """
+
+        self.cur.execute(query1, (threat, street, city))
+
+        incident_id = self.cur.lastrowid
+
+        
+        query2 = """
+        INSERT INTO tbl_dispatch
+        (firefighter_id, incident_id)
+
+        VALUES (%s, %s)
+        """
+
+        self.cur.execute(query2, (fid, incident_id))
+
+        self.conn.commit()
+
+    # MARK AVAILABLE 
+
+    def mark_available(self, fid):
+
+        self.cur.execute(
+            "DELETE FROM tbl_dispatch WHERE firefighter_id = %s",
+            (fid,)
+        )
+
+        self.conn.commit()
+
+    #  INCIDENT 
+
+    def get_incidents(self):
+
+        self.cur.execute("""
+        SELECT incident_id, in_threat, in_street, in_city
+        FROM tbl_incident
+        """)
+
+        return self.cur.fetchall()
+
+    def get_available_firefighters(self):
+
+        query = """
+           SELECT
+               firefighter_id,
+               ff_name,
+               ff_expertise
+
+           FROM tbl_firefighter
+
+           WHERE firefighter_id NOT IN (
+               SELECT firefighter_id
+               FROM tbl_dispatch
+           )
+           """
+
+        self.cur.execute(query)
+
+        return self.cur.fetchall()
+
+
+
+    def add_incident(self, threat, street, city):
+
+        self.cur.execute("""
+        INSERT INTO tbl_incident
+        (in_threat, in_street, in_city)
+
+        VALUES (%s, %s, %s)
+        """, (threat, street, city))
+
+        self.conn.commit()
+
+    def assign_firefighters_to_incident(self, incident_id, firefighter_ids):
+
+        for fid in firefighter_ids:
+            self.cur.execute(
+                """
+                INSERT INTO tbl_dispatch
+                (firefighter_id, incident_id)
+
+                VALUES (%s, %s)
+                """,
+                (fid, incident_id)
+            )
+
+        self.conn.commit()
+
+    def delete_incident(self, iid):
+
+        
+        self.cur.execute(
+            "DELETE FROM tbl_dispatch WHERE incident_id = %s",
+            (iid,)
+        )
+
+        self.cur.execute(
+            "DELETE FROM tbl_incident WHERE incident_id = %s",
+            (iid,)
+        )
+
+        self.conn.commit()
+
+
+#  APP 
+
+class App(tk.Tk):
+
+    def __init__(self):
+        super().__init__()
+        print("A: window started")
+
+        self.withdraw()  # Hide window while building
+        self.title("Fire Station Command")
+        self.geometry("1100x700")
+        self.configure(bg=BG)
+        print("B: UI base set")
+
+        self.db = DB()
+        print("C: DB done")
+
+        self.setup_style()
+        print("E: style done")
+
+        self.build_ui()
+        print("G: UI built")
+
+        self.deiconify()  # Show window now
+        self.refresh()
+        print("H: refresh done")
+
+
+
+    def setup_style(self):
+
+        style = ttk.Style(self)
+        style.theme_use("clam")
+
+        style.configure(
+            "Treeview",
+            background=PANEL,
+            foreground=TEXT,
+            fieldbackground=PANEL,
+            rowheight=30
+        )
+
+        style.configure(
+            "Treeview.Heading",
+            background="#111111",
+            foreground=SUBTEXT
+        )
+
+    
+
+    def build_ui(self):
+
+        
+        header = tk.Frame(self, bg=BG)
+        header.pack(fill="x", padx=20, pady=10)
+
+        tk.Label(
+            header,
+            text="Fire Station Command",
+            fg=ACCENT,
+            bg=BG,
+            font=("Segoe UI", 22, "bold")
+        ).pack(side="left")
+
+        
+        search_frame = tk.Frame(self, bg=PANEL)
+        search_frame.pack(fill="x", padx=20, pady=10)
+
+        tk.Label(
+            search_frame,
+            text="Search:",
+            bg=PANEL,
+            fg=TEXT
+        ).pack(side="left")
+
+        self.search_var = tk.StringVar()
+
+        tk.Entry(
+            search_frame,
+            textvariable=self.search_var,
+            width=25
+        ).pack(side="left", padx=5)
+
+        self.filter_var = tk.StringVar(value="All")
+
+        ttk.Combobox(
+            search_frame,
+            textvariable=self.filter_var,
+            values=["All"] + EXPERTISE_OPTIONS,
+            state="readonly",
+            width=25
+        ).pack(side="left", padx=5)
+
+        tk.Button(
+            search_frame,
+            text="Apply",
+            bg=ACCENT,
+            fg=TEXT,
+            command=self.refresh
+        ).pack(side="left", padx=5)
+
+        tk.Button(
+            search_frame,
+            text="Reset",
+            bg="#444444",
+            fg=TEXT,
+            command=self.reset_filters
+        ).pack(side="left", padx=5)
+
+        # buttons
+        action_frame = tk.Frame(self, bg=PANEL)
+        action_frame.pack(fill="x", padx=20, pady=10)
+
+        def make_btn(text, command, color=ACCENT):
+
+            tk.Button(
+                action_frame,
+                text=text,
+                command=command,
+                bg=color,
+                fg=TEXT,
+                relief="flat",
+                padx=12,
+                pady=6
+            ).pack(side="left", padx=5)
+
+        make_btn("Add Firefighter", self.add_window)
+        make_btn("Edit", self.edit_selected)
+        make_btn("Delete", self.delete_selected, "#7a0000")
+        make_btn("Dispatch", self.dispatch_selected)
+        make_btn("Mark Available", self.mark_available_window, "#2e8b57")
+        make_btn("Manage Incidents", self.incident_window)
+
+        # table
+        table_frame = tk.Frame(self, bg=PANEL)
+        table_frame.pack(fill="both", expand=True, padx=20, pady=10)
+
+        cols = (
+            "ID",
+            "Name",
+            "Contact",
+            "Expertise",
+            "Status",
+            "Threat",
+            "City"
+        )
+
+        self.tree = ttk.Treeview(
+            table_frame,
+            columns=cols,
+            show="headings"
+        )
+
+        for c in cols:
+            self.tree.heading(c, text=c)
+            self.tree.column(c, width=140)
+
+        self.tree.pack(fill="both", expand=True)
+
+    #  RESET FILTERS
+
+    def reset_filters(self):
+
+        self.search_var.set("")
+        self.filter_var.set("All")
+
+        self.refresh()
+
+    #  REFRESH 
+
+    def refresh(self):
+
+        for row in self.tree.get_children():
+            self.tree.delete(row)
+
+        data = self.db.get_firefighters(
+            self.search_var.get(),
+            self.filter_var.get()
+        )
+
+        for row in data:
+            self.tree.insert("", "end", values=row)
+
+    #  GET SELECTED 
+
+    def get_selected_id(self):
+
+        selected = self.tree.selection()
+
+        if not selected:
+            messagebox.showwarning(
+                "No Selection",
+                "Please select a firefighter."
+            )
+            return None
+
+        return self.tree.item(selected[0])["values"][0]
+
+    #  ADD WINDOW 
+
+    def add_window(self):
+
+        w = tk.Toplevel(self)
+
+        w.title("Add Firefighter")
+        w.geometry("550x450")
+        w.configure(bg=PANEL)
+        w.resizable(True, True)
+
+        tk.Label(w, text="Full Name", bg=PANEL, fg=TEXT).pack(pady=8)
+
+        name = tk.Entry(w, width=40)
+        name.pack()
+
+        tk.Label(w, text="Firefighter ID", bg=PANEL, fg=TEXT).pack(pady=8)
+
+        fid = tk.Entry(w, width=40)
+        fid.pack()
+
+        tk.Label(w, text="Contact", bg=PANEL, fg=TEXT).pack(pady=8)
+
+        contact = tk.Entry(w, width=40)
+        contact.pack()
+
+        tk.Label(w, text="Expertise", bg=PANEL, fg=TEXT).pack(pady=8)
+
+        exp = ttk.Combobox(
+            w,
+            values=EXPERTISE_OPTIONS,
+            state="readonly",
+            width=37
+        )
+
+        exp.pack()
+
+        def save():
+
+            try:
+
+                if len(fid.get()) != 8:
+                    messagebox.showerror(
+                        "Error",
+                        "ID must be exactly 8 digits."
+                    )
+                    return
+
+                self.db.add_firefighter(
+                    fid.get(),
+                    name.get(),
+                    contact.get(),
+                    exp.get()
+                )
+
+                self.refresh()
+
+                messagebox.showinfo(
+                    "Success",
+                    "Firefighter added successfully."
+                )
+
+                w.destroy()
+
+            except mysql.connector.Error as e:
+
+                messagebox.showerror(
+                    "Database Error",
+                    str(e)
+                )
+
+        tk.Button(
+            w,
+            text="Save Firefighter",
+            bg=ACCENT,
+            fg=TEXT,
+            command=save
+        ).pack(pady=20)
+
+    #  EDIT 
+
+    def edit_selected(self):
+
+        fid = self.get_selected_id()
+
+        if not fid:
+            return
+
+        values = self.tree.item(self.tree.selection()[0])["values"]
+
+        w = tk.Toplevel(self)
+
+        w.title("Edit Firefighter")
+        w.geometry("550x450")
+        w.configure(bg=PANEL)
+
+        tk.Label(w, text="Full Name", bg=PANEL, fg=TEXT).pack(pady=8)
+
+        name = tk.Entry(w, width=40)
+        name.insert(0, values[1])
+        name.pack()
+
+        tk.Label(w, text="Contact", bg=PANEL, fg=TEXT).pack(pady=8)
+
+        contact = tk.Entry(w, width=40)
+        contact.insert(0, values[2])
+        contact.pack()
+
+        tk.Label(w, text="Expertise", bg=PANEL, fg=TEXT).pack(pady=8)
+
+        exp = ttk.Combobox(
+            w,
+            values=EXPERTISE_OPTIONS,
+            state="readonly",
+            width=37
+        )
+
+        exp.set(values[3])
+        exp.pack()
+
+        def save():
+
+            self.db.update_firefighter(
+                fid,
+                name.get(),
+                contact.get(),
+                exp.get()
+            )
+
+            self.refresh()
+
+            messagebox.showinfo(
+                "Updated",
+                "Record updated successfully."
+            )
+
+            w.destroy()
+
+        tk.Button(
+            w,
+            text="Save Changes",
+            bg=ACCENT,
+            fg=TEXT,
+            command=save
+        ).pack(pady=20)
+
+    # DELETE
+
+    def delete_selected(self):
+
+        fid = self.get_selected_id()
+
+        if not fid:
+            return
+
+        confirm = messagebox.askyesno(
+            "Confirm Delete",
+            "Delete this firefighter?"
+        )
+
+        if confirm:
+
+            self.db.delete_firefighter(fid)
+
+            self.refresh()
+
+    #  DISPATCH 
+
+    def dispatch_selected(self):
+
+        fid = self.get_selected_id()
+
+        if not fid:
+            return
+
+
+        self.db.cur.execute(
+            "SELECT * FROM tbl_dispatch WHERE firefighter_id=%s",
+            (fid,)
+        )
+
+        already = self.db.cur.fetchone()
+
+        if already:
+            messagebox.showerror(
+                "Already Dispatched",
+                "This firefighter is already dispatched!"
+            )
+            return
+
+        
+        w = tk.Toplevel(self)
+        w.title("Dispatch Firefighter")
+        w.geometry("550x450")
+        w.configure(bg=PANEL)
+
+        tk.Label(w, text="Threat", bg=PANEL, fg=TEXT).pack(pady=8)
+        threat = tk.Entry(w, width=40)
+        threat.pack()
+
+        tk.Label(w, text="Street", bg=PANEL, fg=TEXT).pack(pady=8)
+        street = tk.Entry(w, width=40)
+        street.pack()
+
+        tk.Label(w, text="City", bg=PANEL, fg=TEXT).pack(pady=8)
+        city = tk.Entry(w, width=40)
+        city.pack()
+
+        def dispatch():
+
+            self.db.dispatch(
+                fid,
+                threat.get(),
+                street.get(),
+                city.get()
+            )
+
+            self.refresh()
+
+            messagebox.showinfo(
+                "Success",
+                "Firefighter dispatched."
+            )
+
+            w.destroy()
+
+        tk.Button(
+            w,
+            text="Confirm Dispatch",
+            bg=ACCENT,
+            fg=TEXT,
+            command=dispatch
+        ).pack(pady=20)
+
+    #  MARK AVAILABLE 
+
+    def mark_available_window(self):
+
+        fid = self.get_selected_id()
+
+        if not fid:
+            return
+
+        self.db.mark_available(fid)
+
+        self.refresh()
+
+        messagebox.showinfo(
+            "Updated",
+            "Firefighter marked available."
+        )
+
+    #  INCIDENT WINDOW 
+
+    def incident_window(self):
+
+        w = tk.Toplevel(self)
+
+        w.title("Manage Incidents")
+        w.geometry("700x500")
+        w.configure(bg=PANEL)
+
+        tree = ttk.Treeview(
+            w,
+            columns=("ID", "Threat", "Street", "City"),
+            show="headings"
+        )
+
+        for c in ("ID", "Threat", "Street", "City"):
+            tree.heading(c, text=c)
+            tree.column(c, width=150)
+
+        tree.pack(fill="both", expand=True)
+
+        def refresh_incidents():
+
+            for row in tree.get_children():
+                tree.delete(row)
+
+            data = self.db.get_incidents()
+
+            for row in data:
+                tree.insert("", "end", values=row)
+
+        refresh_incidents()
+
+        def add_incident():
+
+            sub = tk.Toplevel(w)
+
+            sub.title("Add Incident")
+            sub.geometry("500x400")
+            sub.configure(bg=PANEL)
+
+            tk.Label(sub, text="Threat", bg=PANEL, fg=TEXT).pack(pady=8)
+
+            threat = tk.Entry(sub, width=40)
+            threat.pack()
+
+            tk.Label(sub, text="Street", bg=PANEL, fg=TEXT).pack(pady=8)
+
+            street = tk.Entry(sub, width=40)
+            street.pack()
+
+            tk.Label(sub, text="City", bg=PANEL, fg=TEXT).pack(pady=8)
+
+            city = tk.Entry(sub, width=40)
+            city.pack()
+
+            def save():
+
+                self.db.add_incident(
+                    threat.get(),
+                    street.get(),
+                    city.get()
+                )
+
+                refresh_incidents()
+
+                sub.destroy()
+
+            tk.Button(
+                sub,
+                text="Save Incident",
+                bg=ACCENT,
+                fg=TEXT,
+                command=save
+            ).pack(pady=20)
+
+        def delete_incident():
+
+            selected = tree.selection()
+
+            if not selected:
+                return
+
+            iid = tree.item(selected[0])["values"][0]
+
+            self.db.delete_incident(iid)
+
+            refresh_incidents()
+
+        def add_multiple_firefighters():
+
+            selected = tree.selection()
+
+            if not selected:
+                messagebox.showwarning(
+                    "No Selection",
+                    "Please select an incident."
+                )
+
+                return
+
+            incident_id = tree.item(selected[0])["values"][0]
+
+            sub = tk.Toplevel(w)
+
+            sub.title("Assign Firefighters")
+            sub.geometry("600x500")
+            sub.configure(bg=PANEL)
+
+            tk.Label(
+                sub,
+                text="Available Firefighters",
+                bg=PANEL,
+                fg=TEXT,
+                font=("Segoe UI", 14, "bold")
+            ).pack(pady=10)
+
+            listbox = tk.Listbox(
+                sub,
+                selectmode=tk.MULTIPLE,
+                bg="#222222",
+                fg=TEXT,
+                width=60,
+                height=15
+            )
+
+            listbox.pack(pady=10)
+
+            firefighters = self.db.get_available_firefighters()
+
+            firefighter_map = {}
+
+            for index, ff in enumerate(firefighters):
+                fid = ff[0]
+                name = ff[1]
+                exp = ff[2]
+
+                display = f"{fid} - {name} ({exp})"
+
+                listbox.insert(tk.END, display)
+
+                firefighter_map[index] = fid
+
+            def confirm():
+
+                selected_indices = listbox.curselection()
+
+                if not selected_indices:
+                    messagebox.showwarning(
+                        "No Selection",
+                        "Select at least one firefighter."
+                    )
+
+                    return
+
+                firefighter_ids = []
+
+                for index in selected_indices:
+                    firefighter_ids.append(
+                        firefighter_map[index]
+                    )
+
+                self.db.assign_firefighters_to_incident(
+                    incident_id,
+                    firefighter_ids
+                )
+
+                self.refresh()
+
+                messagebox.showinfo(
+                    "Success",
+                    "Firefighters assigned successfully."
+                )
+
+                sub.destroy()
+
+            tk.Button(
+                sub,
+                text="Confirm Assignment",
+                bg=ACCENT,
+                fg=TEXT,
+                command=confirm
+            ).pack(pady=15)
+
+        tk.Button(
+            w,
+            text="Add Incident",
+            bg=ACCENT,
+            fg=TEXT,
+            command=add_incident
+        ).pack(pady=5)
+
+        tk.Button(
+            w,
+            text="Delete Incident",
+            bg="#7a0000",
+            fg=TEXT,
+            command=delete_incident
+        ).pack(pady=5)
+        tk.Button(
+            w,
+            text="Add Multiple Firefighters",
+            bg="#2e8b57",
+            fg=TEXT,
+            command=add_multiple_firefighters
+        ).pack(pady=5)
+
+
+
+
+# ---------------- RUN APP ----------------
+
+if __name__ == "__main__":
+
+    try:
+
+        print("Starting app...")
+
+        app = App()
+
+        print("App created successfully")
+
+        app.mainloop()
+
+    except Exception as e:
+
+        print("ERROR OCCURRED:")
+        print(e)
+
+        input("Press Enter to close...")
